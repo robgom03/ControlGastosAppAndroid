@@ -9,6 +9,8 @@ Aplicación Android nativa en español para llevar varios presupuestos mensuales
 - Saldo disponible destacado y aviso al acercarse o superar el límite.
 - Archivado automático al cambiar de mes: conserva límite, gasto total y diferencia, y elimina los movimientos individuales cerrados.
 - Historial separado por cuenta y confirmación antes de eliminar una cuenta.
+- Teclado numérico para importes, calendario para elegir la fecha y orden manual de cuentas manteniendo pulsada una cuenta y arrastrándola.
+- La última cuenta abierta se restaura al volver a iniciar la app, y el histórico incluye totales anuales de gasto y ahorro.
 
 ## Abrir y ejecutar
 

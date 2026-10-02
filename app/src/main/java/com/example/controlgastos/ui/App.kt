@@ -1,5 +1,6 @@
 package com.example.controlgastos.ui
 
+import android.app.DatePickerDialog
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -15,8 +16,12 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items as rowItems
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -37,17 +42,24 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.ui.platform.LocalContext
 import com.example.controlgastos.BudgetViewModel
 import com.example.controlgastos.data.Account
 import com.example.controlgastos.data.Expense
 import com.example.controlgastos.data.MonthlySummary
+import com.example.controlgastos.data.AnnualSummary
+import com.example.controlgastos.data.YearTotals
 import java.text.NumberFormat
 import java.time.LocalDate
 import java.time.YearMonth
@@ -55,6 +67,7 @@ import java.time.format.DateTimeFormatter
 import java.time.format.DateTimeParseException
 import java.util.Locale
 import androidx.compose.ui.unit.sp
+import kotlin.math.abs
 
 private val currency: NumberFormat = NumberFormat.getCurrencyInstance(Locale("es", "ES"))
 private fun money(cents: Long) = currency.format(cents / 100.0)
@@ -66,8 +79,11 @@ fun ControlGastosApp(viewModel: BudgetViewModel) {
     val selectedId by viewModel.selectedAccountId.collectAsStateWithLifecycle()
     val expenses by viewModel.expenses.collectAsStateWithLifecycle(initialValue = emptyList())
     val summaries by viewModel.summaries.collectAsStateWithLifecycle(initialValue = emptyList())
+    val currentYearTotals by viewModel.currentYearTotals.collectAsStateWithLifecycle(initialValue = YearTotals(0, 0))
+    val annualSummaries by viewModel.annualSummaries.collectAsStateWithLifecycle(initialValue = emptyList())
     val selected = accounts.find { it.id == selectedId }
     var showHistory by remember { mutableStateOf(false) }
+    var showAnnualHistory by remember { mutableStateOf(false) }
     var accountEditor by remember { mutableStateOf<Account?>(null) }
     var addingAccount by remember { mutableStateOf(false) }
     var expenseEditor by remember { mutableStateOf<Expense?>(null) }
@@ -81,16 +97,17 @@ fun ControlGastosApp(viewModel: BudgetViewModel) {
 
     MaterialTheme {
         Scaffold(
-            topBar = { Header(showHistory, { showHistory = !showHistory }, { addingAccount = true }) },
+            topBar = { Header(showHistory && !showAnnualHistory, { showHistory = !showHistory; showAnnualHistory = false }, { addingAccount = true }) },
             floatingActionButton = {
                 if (!showHistory && selected != null) FloatingActionButton(onClick = { addingExpense = true }) { Text("+", fontWeight = FontWeight.Bold, fontSize = 40.sp) }
             }
         ) { padding ->
             if (accounts.isEmpty()) EmptyState(Modifier.padding(padding), { addingAccount = true })
             else Column(Modifier.fillMaxSize().padding(padding)) {
-                AccountChooser(accounts, selectedId, viewModel::select)
+                AccountChooser(accounts, selectedId, viewModel::select, viewModel::saveAccountOrder)
                 if (selected != null) {
-                    if (showHistory) HistoryScreen(selected, summaries)
+                    if (showAnnualHistory) AnnualHistoryScreen(selected, currentYearTotals, annualSummaries, onBack = { showAnnualHistory = false })
+                    else if (showHistory) HistoryScreen(selected, summaries, currentYearTotals, onShowAnnualHistory = { showAnnualHistory = true })
                     else ExpenseScreen(selected, expenses, onEditAccount = { accountEditor = selected }, onDeleteAccount = { deletingAccount = selected }, onEditExpense = { expenseEditor = it }, onDeleteExpense = { deletingExpense = it })
                 }
             }
@@ -112,10 +129,65 @@ fun ControlGastosApp(viewModel: BudgetViewModel) {
     }
 }
 
-@Composable private fun AccountChooser(accounts: List<Account>, selected: Long?, onSelect: (Long) -> Unit) = LazyRow(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-    rowItems(accounts, key = { it.id }) { account ->
+@Composable private fun AccountChooser(accounts: List<Account>, selected: Long?, onSelect: (Long) -> Unit, onOrderChange: (List<Long>) -> Unit) {
+    var orderedIds by remember { mutableStateOf(emptyList<Long>()) }
+    var draggingId by remember { mutableStateOf<Long?>(null) }
+    var dragOffset by remember { mutableStateOf(0f) }
+    val listState = rememberLazyListState()
+    LaunchedEffect(accounts) {
+        val incoming = accounts.map { it.id }
+        orderedIds = if (orderedIds.toSet() == incoming.toSet()) orderedIds else incoming
+    }
+    val shownAccounts = (if (orderedIds.isEmpty()) accounts.map { it.id } else orderedIds).mapNotNull { id -> accounts.find { it.id == id } }
+    LazyRow(state = listState, modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        itemsIndexed(shownAccounts, key = { _, account -> account.id }) { _, account ->
         val active = account.id == selected
-        Button(onClick = { onSelect(account.id) }, colors = if (active) ButtonDefaults.buttonColors() else ButtonDefaults.outlinedButtonColors()) { Text(account.name) }
+        val isDragging = draggingId == account.id
+        Button(
+            onClick = { onSelect(account.id) },
+            colors = if (active) ButtonDefaults.buttonColors() else ButtonDefaults.outlinedButtonColors(),
+            modifier = Modifier
+                .zIndex(if (isDragging) 1f else 0f)
+                .graphicsLayer {
+                    if (isDragging) {
+                        translationX = dragOffset
+                        shadowElevation = 18f
+                    }
+                }
+                .pointerInput(account.id, orderedIds) {
+                detectDragGesturesAfterLongPress(
+                    onDragStart = { draggingId = account.id; dragOffset = 0f },
+                    onDrag = { change, dragAmount ->
+                        change.consume()
+                        dragOffset += dragAmount.x
+                        val layout = listState.layoutInfo
+                        if (change.position.x > layout.viewportEndOffset - 48f) listState.dispatchRawDelta(24f)
+                        else if (change.position.x < layout.viewportStartOffset + 48f) listState.dispatchRawDelta(-24f)
+                        val draggedItem = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == account.id }
+                        val targetItem = draggedItem?.let { item ->
+                            val center = item.offset + item.size / 2 + dragOffset
+                            listState.layoutInfo.visibleItemsInfo.minByOrNull { visible -> abs((visible.offset + visible.size / 2) - center) }
+                        }
+                        val targetId = targetItem?.key as? Long
+                        if (targetId != null && targetId != account.id) {
+                            val from = orderedIds.indexOf(account.id)
+                            val to = orderedIds.indexOf(targetId)
+                            if (from >= 0 && to >= 0) {
+                                val oldOffset = draggedItem?.offset ?: 0
+                                val newOffset = targetItem.offset
+                                val reordered = orderedIds.toMutableList().apply { removeAt(from); add(to, account.id) }
+                                orderedIds = reordered
+                                dragOffset += oldOffset - newOffset
+                                onOrderChange(reordered)
+                            }
+                        }
+                    },
+                    onDragEnd = { draggingId = null; dragOffset = 0f },
+                    onDragCancel = { draggingId = null; dragOffset = 0f }
+                )
+            }
+        ) { Text(account.name) }
+        }
     }
 }
 
@@ -159,26 +231,65 @@ fun ControlGastosApp(viewModel: BudgetViewModel) {
     }
 }
 
-@Composable private fun HistoryScreen(account: Account, summaries: List<MonthlySummary>) = LazyColumn(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-    item { Text("Histórico · ${account.name}", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold); Text("Los movimientos antiguos se eliminan; aquí solo se guarda su resumen.", color = MaterialTheme.colorScheme.onSurfaceVariant); Spacer(Modifier.height(8.dp)) }
+@Composable private fun HistoryScreen(account: Account, summaries: List<MonthlySummary>, yearTotals: YearTotals, onShowAnnualHistory: () -> Unit) = LazyColumn(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    item {
+        Text("Resumen de ${account.name} · ${YearMonth.now().year}", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer), modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) {
+            Row(Modifier.fillMaxWidth().padding(14.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                Column { Text("Total gastado"); Text(money(yearTotals.spentCents), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) }
+                Column(horizontalAlignment = Alignment.End) { Text("Total ahorrado"); Text(money(yearTotals.savedCents), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Color(0xFF147D3D)) }
+            }
+        }
+        TextButton(onClick = onShowAnnualHistory) { Text("Años anteriores") }
+    }
+    item { Spacer(Modifier.height(8.dp)); Text("Histórico · ${account.name}", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold); Text("Los movimientos antiguos se eliminan; aquí solo se guarda su resumen.", color = MaterialTheme.colorScheme.onSurfaceVariant); Spacer(Modifier.height(8.dp)) }
     if (summaries.isEmpty()) item { Text("Aún no hay meses archivados.") }
     items(summaries, key = { it.id }) { summary -> SummaryRow(summary) }
+}
+
+@Composable private fun AnnualHistoryScreen(account: Account, yearTotals: YearTotals, annualSummaries: List<AnnualSummary>, onBack: () -> Unit) = LazyColumn(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    item { Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) { Text("Años · ${account.name}", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f)); TextButton(onClick = onBack) { Text("Volver") } } }
+    item { Text("${YearMonth.now().year} (actual)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold); AnnualSummaryRow(AnnualSummary(account.id, YearMonth.now().year.toString(), yearTotals.spentCents, yearTotals.savedCents)) }
+    if (annualSummaries.isEmpty()) item { Text("Aún no hay años cerrados para esta cuenta.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+    else {
+        item { Text("Años cerrados", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 8.dp)) }
+        items(annualSummaries.filter { it.year != YearMonth.now().year.toString() }, key = { it.year }) { summary -> AnnualSummaryRow(summary) }
+    }
 }
 
 @Composable private fun SummaryRow(summary: MonthlySummary) = Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(14.dp)) {
     Text(monthLabel(summary.month), fontWeight = FontWeight.Bold); Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text("Límite ${money(summary.limitCents)} · Gastado ${money(summary.spentCents)}"); Text(if (summary.balanceCents >= 0) "+${money(summary.balanceCents)}" else money(summary.balanceCents), color = if (summary.balanceCents < 0) MaterialTheme.colorScheme.error else Color(0xFF147D3D), fontWeight = FontWeight.Bold) }
 } }
 
+@Composable private fun AnnualSummaryRow(summary: AnnualSummary) = Card(Modifier.fillMaxWidth()) { Row(Modifier.fillMaxWidth().padding(14.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+    Text(summary.year, fontWeight = FontWeight.Bold)
+    Text("Gastado: ${money(summary.spentCents)}")
+    Text("Ahorrado: ${money(summary.savedCents)}", color = Color(0xFF147D3D), fontWeight = FontWeight.Bold)
+} }
+
 @Composable private fun AccountDialog(account: Account?, onClose: () -> Unit, onSave: (String, Long, Long) -> Unit) {
     var name by remember(account) { mutableStateOf(account?.name ?: "") }; var limit by remember(account) { mutableStateOf(account?.let { (it.limitCents / 100.0).toString() } ?: "") }; var warning by remember(account) { mutableStateOf(account?.let { (it.warningCents / 100.0).toString() } ?: "") }; var error by remember { mutableStateOf<String?>(null) }
-    AlertDialog(onDismissRequest = onClose, title = { Text(if (account == null) "Nueva cuenta" else "Editar cuenta") }, text = { Column { OutlinedTextField(name, { name = it }, label = { Text("Nombre") }, singleLine = true); OutlinedTextField(limit, { limit = it }, label = { Text("Límite mensual (€)") }, singleLine = true); OutlinedTextField(warning, { warning = it }, label = { Text("Avisar cuando queden (€)") }, singleLine = true); error?.let { Text(it, color = MaterialTheme.colorScheme.error) } } }, confirmButton = { Button(onClick = { val l = parseEuros(limit); val w = parseEuros(warning); if (name.isBlank() || l == null || l <= 0 || w == null || w < 0) error = "Revisa el nombre y los importes." else onSave(name, l, w) }) { Text("Guardar") } }, dismissButton = { TextButton(onClick = onClose) { Text("Cancelar") } })
+    AlertDialog(onDismissRequest = onClose, title = { Text(if (account == null) "Nueva cuenta" else "Editar cuenta") }, text = { Column { OutlinedTextField(name, { name = it }, label = { Text("Nombre") }, singleLine = true); OutlinedTextField(limit, { limit = it }, label = { Text("Límite mensual (€)") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)); OutlinedTextField(warning, { warning = it }, label = { Text("Avisar cuando queden (€)") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)); error?.let { Text(it, color = MaterialTheme.colorScheme.error) } } }, confirmButton = { Button(onClick = { val l = parseEuros(limit); val w = parseEuros(warning); if (name.isBlank() || l == null || l <= 0 || w == null || w < 0) error = "Revisa el nombre y los importes." else if (w > l) error = "El aviso no puede ser mayor que el límite mensual." else onSave(name, l, w) }) { Text("Guardar") } }, dismissButton = { TextButton(onClick = onClose) { Text("Cancelar") } })
 }
 
 @Composable private fun ExpenseDialog(accountId: Long, expense: Expense?, onClose: () -> Unit, onSave: (Expense) -> Unit) {
     var date by remember(expense) { mutableStateOf(expense?.date ?: LocalDate.now().toString()) }; var amount by remember(expense) { mutableStateOf(expense?.let { (it.amountCents / 100.0).toString() } ?: "") }; var description by remember(expense) { mutableStateOf(expense?.description ?: "") }; var error by remember { mutableStateOf<String?>(null) }
-    AlertDialog(onDismissRequest = onClose, title = { Text(if (expense == null) "Añadir gasto" else "Editar gasto") }, text = { Column { OutlinedTextField(date, { date = it }, label = { Text("Fecha (AAAA-MM-DD)") }, singleLine = true); OutlinedTextField(amount, { amount = it }, label = { Text("Importe (€)") }, singleLine = true); OutlinedTextField(description, { description = it }, label = { Text("En qué (opcional)") }, singleLine = true); error?.let { Text(it, color = MaterialTheme.colorScheme.error) } } }, confirmButton = { Button(onClick = { val cents = parseEuros(amount); val parsed = try { LocalDate.parse(date) } catch (_: DateTimeParseException) { null }; val currentMonth = YearMonth.now(); if (cents == null || cents <= 0 || parsed == null || YearMonth.from(parsed) != currentMonth) error = "La fecha debe ser de este mes y el importe mayor que cero." else onSave(Expense(expense?.id ?: 0, accountId, date, cents, description)) }) { Text("Guardar") } }, dismissButton = { TextButton(onClick = onClose) { Text("Cancelar") } })
+    val context = LocalContext.current
+    fun showCalendar() {
+        val current = LocalDate.now()
+        DatePickerDialog(context, { _, year, month, day -> date = LocalDate.of(year, month + 1, day).toString() }, current.year, current.monthValue - 1, current.dayOfMonth).show()
+    }
+    AlertDialog(onDismissRequest = onClose, title = { Text(if (expense == null) "Añadir gasto" else "Editar gasto") }, text = { Column { OutlinedTextField(date, { date = formatDateWithHyphens(it) }, label = { Text("Fecha (AAAA-MM-DD)") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), trailingIcon = { TextButton(onClick = { showCalendar() }) { Text("📅") } }); OutlinedTextField(amount, { amount = it }, label = { Text("Importe (€)") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)); OutlinedTextField(description, { description = it }, label = { Text("En qué (opcional)") }, singleLine = true); error?.let { Text(it, color = MaterialTheme.colorScheme.error) } } }, confirmButton = { Button(onClick = { val cents = parseEuros(amount); val parsed = try { LocalDate.parse(date) } catch (_: DateTimeParseException) { null }; val currentMonth = YearMonth.now(); if (cents == null || cents <= 0 || parsed == null || YearMonth.from(parsed) != currentMonth) error = "La fecha debe ser de este mes y el importe mayor que cero." else onSave(Expense(expense?.id ?: 0, accountId, parsed.toString(), cents, description)) }) { Text("Guardar") } }, dismissButton = { TextButton(onClick = onClose) { Text("Cancelar") } })
 }
 
 @Composable private fun ConfirmDialog(title: String, message: String, cancel: () -> Unit, confirm: () -> Unit) = AlertDialog(onDismissRequest = cancel, title = { Text(title) }, text = { Text(message) }, confirmButton = { Button(onClick = confirm, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text("Eliminar") } }, dismissButton = { TextButton(onClick = cancel) { Text("Cancelar") } })
 
 private fun monthLabel(month: String): String = try { YearMonth.parse(month).atDay(1).format(DateTimeFormatter.ofPattern("MMMM yyyy", Locale("es", "ES"))).replaceFirstChar { it.uppercase() } } catch (_: Exception) { month }
+private fun formatDateWithHyphens(input: String): String {
+    val digits = input.filter(Char::isDigit).take(8)
+    return when {
+        digits.length <= 4 -> digits
+        digits.length <= 6 -> digits.take(4) + "-" + digits.drop(4)
+        else -> digits.take(4) + "-" + digits.substring(4, 6) + "-" + digits.drop(6)
+    }
+}

@@ -22,11 +22,14 @@ class BudgetViewModel(application: android.app.Application) : AndroidViewModel(a
     val selectedAccountId = MutableStateFlow<Long?>(null)
     val expenses = selectedAccountId.flatMapLatest { id -> if (id == null) flowOf(emptyList()) else repository.expenses(id) }
     val summaries = selectedAccountId.flatMapLatest { id -> if (id == null) flowOf(emptyList()) else repository.summaries(id) }
+    val currentYearTotals = selectedAccountId.flatMapLatest { id -> if (id == null) flowOf(com.example.controlgastos.data.YearTotals(0, 0)) else repository.currentYearTotals(id) }
+    val annualSummaries = selectedAccountId.flatMapLatest { id -> if (id == null) flowOf(emptyList()) else repository.annualSummaries(id) }
 
-    init { viewModelScope.launch { repository.processMonthChange() } }
-    fun select(id: Long) { selectedAccountId.value = id }
+    init { viewModelScope.launch { repository.processMonthChange(); repository.lastSelectedAccountId()?.let { selectedAccountId.value = it } } }
+    fun select(id: Long) { selectedAccountId.value = id; repository.saveLastSelectedAccount(id) }
     fun saveAccount(id: Long?, name: String, limit: Long, warning: Long) = viewModelScope.launch { repository.saveAccount(id, name, limit, warning) }
-    fun deleteAccount(id: Long) = viewModelScope.launch { repository.deleteAccount(id); if (selectedAccountId.value == id) selectedAccountId.value = null }
+    fun deleteAccount(id: Long) = viewModelScope.launch { repository.deleteAccount(id); if (selectedAccountId.value == id) { selectedAccountId.value = null; repository.clearLastSelectedAccount() } }
+    fun saveAccountOrder(ids: List<Long>) = viewModelScope.launch { repository.saveAccountOrder(ids) }
     fun saveExpense(expense: Expense) = viewModelScope.launch { repository.saveExpense(expense) }
     fun deleteExpense(id: Long) = viewModelScope.launch { repository.deleteExpense(id) }
 }
