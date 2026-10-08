@@ -2,6 +2,7 @@ package com.example.controlgastos.ui
 
 import android.app.DatePickerDialog
 import androidx.compose.foundation.background
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -12,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -36,11 +38,13 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.foundation.Image
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.Alignment
@@ -54,7 +58,10 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.painterResource
 import com.example.controlgastos.BudgetViewModel
+import com.example.controlgastos.R
 import com.example.controlgastos.data.Account
 import com.example.controlgastos.data.Expense
 import com.example.controlgastos.data.MonthlySummary
@@ -67,7 +74,6 @@ import java.time.format.DateTimeFormatter
 import java.time.format.DateTimeParseException
 import java.util.Locale
 import androidx.compose.ui.unit.sp
-import kotlin.math.abs
 
 private val currency: NumberFormat = NumberFormat.getCurrencyInstance(Locale("es", "ES"))
 private fun money(cents: Long) = currency.format(cents / 100.0)
@@ -81,6 +87,7 @@ fun ControlGastosApp(viewModel: BudgetViewModel) {
     val summaries by viewModel.summaries.collectAsStateWithLifecycle(initialValue = emptyList())
     val currentYearTotals by viewModel.currentYearTotals.collectAsStateWithLifecycle(initialValue = YearTotals(0, 0))
     val annualSummaries by viewModel.annualSummaries.collectAsStateWithLifecycle(initialValue = emptyList())
+    val appReady by viewModel.appReady.collectAsStateWithLifecycle()
     val selected = accounts.find { it.id == selectedId }
     var showHistory by remember { mutableStateOf(false) }
     var showAnnualHistory by remember { mutableStateOf(false) }
@@ -96,6 +103,10 @@ fun ControlGastosApp(viewModel: BudgetViewModel) {
     }
 
     MaterialTheme {
+        if (!appReady) {
+            SplashScreen()
+            return@MaterialTheme
+        }
         Scaffold(
             topBar = { Header(showHistory && !showAnnualHistory, { showHistory = !showHistory; showAnnualHistory = false }, { addingAccount = true }) },
             floatingActionButton = {
@@ -121,19 +132,28 @@ fun ControlGastosApp(viewModel: BudgetViewModel) {
     deletingExpense?.let { expense -> ConfirmDialog("¿Eliminar este gasto?", "Esta acción no se puede deshacer.", { deletingExpense = null }) { viewModel.deleteExpense(expense.id); deletingExpense = null } }
 }
 
+@Composable private fun SplashScreen() = Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+    Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+        Image(painter = painterResource(R.mipmap.ic_launcher_foreground), contentDescription = "Control de gastos", modifier = Modifier.size(300.dp))
+    }
+}
+
 @Composable private fun Header(history: Boolean, onHistory: () -> Unit, onNewAccount: () -> Unit) = Surface(shadowElevation = 3.dp) {
     Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text("Gastos💸", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+        Text("Gastos", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
         TextButton(onClick = onHistory) { Text(if (history) "Gastos" else "Histórico") }
         TextButton(onClick = onNewAccount) { Text("Nueva Cuenta") }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable private fun AccountChooser(accounts: List<Account>, selected: Long?, onSelect: (Long) -> Unit, onOrderChange: (List<Long>) -> Unit) {
     var orderedIds by remember { mutableStateOf(emptyList<Long>()) }
     var draggingId by remember { mutableStateOf<Long?>(null) }
     var dragOffset by remember { mutableStateOf(0f) }
     val listState = rememberLazyListState()
+    val latestOrder by rememberUpdatedState(orderedIds)
+    val itemSpacingPx = with(LocalDensity.current) { 8.dp.toPx() }
     LaunchedEffect(accounts) {
         val incoming = accounts.map { it.id }
         orderedIds = if (orderedIds.toSet() == incoming.toSet()) orderedIds else incoming
@@ -146,7 +166,7 @@ fun ControlGastosApp(viewModel: BudgetViewModel) {
         Button(
             onClick = { onSelect(account.id) },
             colors = if (active) ButtonDefaults.buttonColors() else ButtonDefaults.outlinedButtonColors(),
-            modifier = Modifier
+            modifier = (if (isDragging) Modifier else Modifier.animateItemPlacement())
                 .zIndex(if (isDragging) 1f else 0f)
                 .graphicsLayer {
                     if (isDragging) {
@@ -154,35 +174,46 @@ fun ControlGastosApp(viewModel: BudgetViewModel) {
                         shadowElevation = 18f
                     }
                 }
-                .pointerInput(account.id, orderedIds) {
+                .pointerInput(account.id) {
                 detectDragGesturesAfterLongPress(
                     onDragStart = { draggingId = account.id; dragOffset = 0f },
                     onDrag = { change, dragAmount ->
                         change.consume()
                         dragOffset += dragAmount.x
                         val layout = listState.layoutInfo
-                        if (change.position.x > layout.viewportEndOffset - 48f) listState.dispatchRawDelta(24f)
-                        else if (change.position.x < layout.viewportStartOffset + 48f) listState.dispatchRawDelta(-24f)
-                        val draggedItem = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == account.id }
-                        val targetItem = draggedItem?.let { item ->
-                            val center = item.offset + item.size / 2 + dragOffset
-                            listState.layoutInfo.visibleItemsInfo.minByOrNull { visible -> abs((visible.offset + visible.size / 2) - center) }
+                        val scrollDelta = when {
+                            change.position.x > layout.viewportEndOffset - 48f -> 24f
+                            change.position.x < layout.viewportStartOffset + 48f -> -24f
+                            else -> 0f
                         }
-                        val targetId = targetItem?.key as? Long
-                        if (targetId != null && targetId != account.id) {
-                            val from = orderedIds.indexOf(account.id)
-                            val to = orderedIds.indexOf(targetId)
-                            if (from >= 0 && to >= 0) {
-                                val oldOffset = draggedItem?.offset ?: 0
-                                val newOffset = targetItem.offset
-                                val reordered = orderedIds.toMutableList().apply { removeAt(from); add(to, account.id) }
+                        if (scrollDelta != 0f) {
+                            listState.dispatchRawDelta(scrollDelta)
+                            // The content moves while the finger stays still, so keep the floating item under it.
+                            dragOffset += scrollDelta
+                        }
+                        val draggedItem = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == account.id }
+                        val from = latestOrder.indexOf(account.id)
+                        val direction = if (dragAmount.x >= 0f) 1 else -1
+                        val neighbourIndex = from + direction
+                        val neighbourId = latestOrder.getOrNull(neighbourIndex)
+                        val neighbourItem = neighbourId?.let { id -> listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == id } }
+                        if (draggedItem != null && neighbourItem != null && from >= 0) {
+                            val draggedCenter = draggedItem.offset + draggedItem.size / 2 + dragOffset
+                            val neighbourCenter = neighbourItem.offset + neighbourItem.size / 2
+                            val crossedNeighbour = if (direction > 0) draggedCenter > neighbourCenter else draggedCenter < neighbourCenter
+                            if (crossedNeighbour) {
+                                val reordered = latestOrder.toMutableList().apply { removeAt(from); add(neighbourIndex, account.id) }
                                 orderedIds = reordered
-                                dragOffset += oldOffset - newOffset
+                                // Preserve the finger position when the dragged item changes its base slot.
+                                dragOffset += if (direction > 0) -(neighbourItem.size + itemSpacingPx) else neighbourItem.size + itemSpacingPx
                                 onOrderChange(reordered)
                             }
                         }
                     },
-                    onDragEnd = { draggingId = null; dragOffset = 0f },
+                    onDragEnd = {
+                        draggingId = null
+                        dragOffset = 0f
+                    },
                     onDragCancel = { draggingId = null; dragOffset = 0f }
                 )
             }
@@ -237,12 +268,12 @@ fun ControlGastosApp(viewModel: BudgetViewModel) {
         Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer), modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) {
             Row(Modifier.fillMaxWidth().padding(14.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                 Column { Text("Total gastado"); Text(money(yearTotals.spentCents), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) }
-                Column(horizontalAlignment = Alignment.End) { Text("Total ahorrado"); Text(money(yearTotals.savedCents), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Color(0xFF147D3D)) }
+                Column(horizontalAlignment = Alignment.End) { Text("Total ahorrado"); Text(money(yearTotals.savedCents), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = if (yearTotals.savedCents < 0) MaterialTheme.colorScheme.error else Color(0xFF147D3D)) }
             }
         }
         TextButton(onClick = onShowAnnualHistory) { Text("Años anteriores") }
     }
-    item { Spacer(Modifier.height(8.dp)); Text("Histórico · ${account.name}", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold); Text("Los movimientos antiguos se eliminan; aquí solo se guarda su resumen.", color = MaterialTheme.colorScheme.onSurfaceVariant); Spacer(Modifier.height(8.dp)) }
+    item { Spacer(Modifier.height(8.dp)); Text("Histórico · ${account.name}", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold); Spacer(Modifier.height(8.dp)) }
     if (summaries.isEmpty()) item { Text("Aún no hay meses archivados.") }
     items(summaries, key = { it.id }) { summary -> SummaryRow(summary) }
 }
@@ -264,7 +295,7 @@ fun ControlGastosApp(viewModel: BudgetViewModel) {
 @Composable private fun AnnualSummaryRow(summary: AnnualSummary) = Card(Modifier.fillMaxWidth()) { Row(Modifier.fillMaxWidth().padding(14.dp), horizontalArrangement = Arrangement.SpaceBetween) {
     Text(summary.year, fontWeight = FontWeight.Bold)
     Text("Gastado: ${money(summary.spentCents)}")
-    Text("Ahorrado: ${money(summary.savedCents)}", color = Color(0xFF147D3D), fontWeight = FontWeight.Bold)
+    Text("Ahorrado: ${money(summary.savedCents)}", color = if (summary.savedCents < 0) MaterialTheme.colorScheme.error else Color(0xFF147D3D), fontWeight = FontWeight.Bold)
 } }
 
 @Composable private fun AccountDialog(account: Account?, onClose: () -> Unit, onSave: (String, Long, Long) -> Unit) {

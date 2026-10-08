@@ -80,11 +80,8 @@ interface BudgetDao {
     @Query("SELECT * FROM annual_summaries WHERE accountId = :accountId ORDER BY year DESC") fun annualSummaries(accountId: Long): Flow<List<AnnualSummary>>
     @Query("""
         SELECT
-          COALESCE((SELECT SUM(spentCents) FROM monthly_summaries WHERE accountId = :accountId AND substr(month, 1, 4) = :year), 0) +
-          COALESCE((SELECT SUM(amountCents) FROM expenses WHERE accountId = :accountId), 0) AS spentCents,
-          COALESCE((SELECT SUM(CASE WHEN balanceCents > 0 THEN balanceCents ELSE 0 END) FROM monthly_summaries WHERE accountId = :accountId AND substr(month, 1, 4) = :year), 0) +
-          COALESCE((SELECT CASE WHEN limitCents - COALESCE((SELECT SUM(amountCents) FROM expenses WHERE accountId = :accountId), 0) > 0
-            THEN limitCents - COALESCE((SELECT SUM(amountCents) FROM expenses WHERE accountId = :accountId), 0) ELSE 0 END FROM accounts WHERE id = :accountId), 0) AS savedCents
+          COALESCE((SELECT SUM(spentCents) FROM monthly_summaries WHERE accountId = :accountId AND substr(month, 1, 4) = :year), 0) AS spentCents,
+          COALESCE((SELECT SUM(balanceCents) FROM monthly_summaries WHERE accountId = :accountId AND substr(month, 1, 4) = :year), 0) AS savedCents
     """) fun currentYearTotals(accountId: Long, year: String): Flow<YearTotals>
     @Query("SELECT COALESCE(SUM(amountCents), 0) FROM expenses WHERE accountId = :accountId") suspend fun total(accountId: Long): Long
     @Insert suspend fun addAccount(account: Account): Long
@@ -99,7 +96,7 @@ interface BudgetDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun addAnnualSummary(summary: AnnualSummary)
     @Query("DELETE FROM expenses") suspend fun clearExpenses()
     @Query("SELECT COALESCE(SUM(spentCents), 0) FROM monthly_summaries WHERE accountId = :accountId AND substr(month, 1, 4) = :year") suspend fun yearlySpent(accountId: Long, year: String): Long
-    @Query("SELECT COALESCE(SUM(CASE WHEN balanceCents > 0 THEN balanceCents ELSE 0 END), 0) FROM monthly_summaries WHERE accountId = :accountId AND substr(month, 1, 4) = :year") suspend fun yearlySaved(accountId: Long, year: String): Long
+    @Query("SELECT COALESCE(SUM(balanceCents), 0) FROM monthly_summaries WHERE accountId = :accountId AND substr(month, 1, 4) = :year") suspend fun yearlySaved(accountId: Long, year: String): Long
 
     @Transaction
     suspend fun archiveAndReset(month: String, accounts: List<Account>) {
@@ -123,7 +120,7 @@ interface BudgetDao {
     }
 }
 
-@Database(entities = [Account::class, Expense::class, MonthlySummary::class, AnnualSummary::class], version = 3, exportSchema = false)
+@Database(entities = [Account::class, Expense::class, MonthlySummary::class, AnnualSummary::class], version = 4, exportSchema = false)
 abstract class BudgetDatabase : RoomDatabase() {
     abstract fun dao(): BudgetDao
     companion object {
@@ -142,7 +139,13 @@ abstract class BudgetDatabase : RoomDatabase() {
                 database.execSQL("DROP TABLE annual_summaries_old")
             }
         }
-        fun create(context: Context): BudgetDatabase = Room.databaseBuilder(context, BudgetDatabase::class.java, "control-gastos.db").addMigrations(migration1to2, migration2to3).build()
+        private val migration3to4 = object : Migration(3, 4) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("DELETE FROM annual_summaries")
+                database.execSQL("INSERT INTO annual_summaries (accountId, year, spentCents, savedCents) SELECT accountId, substr(month, 1, 4), SUM(spentCents), SUM(balanceCents) FROM monthly_summaries GROUP BY accountId, substr(month, 1, 4)")
+            }
+        }
+        fun create(context: Context): BudgetDatabase = Room.databaseBuilder(context, BudgetDatabase::class.java, "control-gastos.db").addMigrations(migration1to2, migration2to3, migration3to4).build()
     }
 }
 

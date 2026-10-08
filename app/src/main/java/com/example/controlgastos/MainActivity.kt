@@ -13,7 +13,9 @@ import com.example.controlgastos.data.Expense
 import com.example.controlgastos.ui.ControlGastosApp
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class BudgetViewModel(application: android.app.Application) : AndroidViewModel(application) {
@@ -24,8 +26,17 @@ class BudgetViewModel(application: android.app.Application) : AndroidViewModel(a
     val summaries = selectedAccountId.flatMapLatest { id -> if (id == null) flowOf(emptyList()) else repository.summaries(id) }
     val currentYearTotals = selectedAccountId.flatMapLatest { id -> if (id == null) flowOf(com.example.controlgastos.data.YearTotals(0, 0)) else repository.currentYearTotals(id) }
     val annualSummaries = selectedAccountId.flatMapLatest { id -> if (id == null) flowOf(emptyList()) else repository.annualSummaries(id) }
+    val appReady = MutableStateFlow(false)
 
-    init { viewModelScope.launch { repository.processMonthChange(); repository.lastSelectedAccountId()?.let { selectedAccountId.value = it } } }
+    init {
+        viewModelScope.launch {
+            repository.processMonthChange()
+            val loadedAccounts = repository.accounts.first()
+            repository.lastSelectedAccountId()?.takeIf { saved -> loadedAccounts.any { it.id == saved } }?.let { selectedAccountId.value = it }
+            delay(900)
+            appReady.value = true
+        }
+    }
     fun select(id: Long) { selectedAccountId.value = id; repository.saveLastSelectedAccount(id) }
     fun saveAccount(id: Long?, name: String, limit: Long, warning: Long) = viewModelScope.launch { repository.saveAccount(id, name, limit, warning) }
     fun deleteAccount(id: Long) = viewModelScope.launch { repository.deleteAccount(id); if (selectedAccountId.value == id) { selectedAccountId.value = null; repository.clearLastSelectedAccount() } }
